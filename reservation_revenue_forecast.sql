@@ -1,0 +1,271 @@
+/*
+================================================================================
+  Project      : Revenue Forecasting using SQL
+  Dataset      : Dummy Rental Data
+  Description  : Forecasts rental revenue for current month (M0) and
+                 the next 3 months (M1–M3) using date-windowing logic.
+
+  Features
+    - Revenue Allocation      : splits rental, insurance, and extras per day
+    - Current Month Forecast  : M0 — days/revenue falling in current month
+    - Next 3 Months Forecast  : M1, M2, M3 rolling monthly windows
+    - Daily Revenue Calc      : rate + prorated insurance + prorated extras
+    - CASE WHEN Mapping       : branch codes → names, charge groups → sizes
+    - CTE                     : isolates reusable revenue expressions
+    - Window Function         : running revenue total per branch
+
+  Tables
+    - reservation  : booking header (status, dates, branch)
+    - customer     : renter profile
+    - vehicle      : car size / charge group
+    - booking      : financial detail (rate, sold days, insurance, extras)
+================================================================================
+*/
+
+-- ============================================================
+-- CTE 1 : base_booking
+--   Joins all tables and pre-calculates daily prorated amounts
+-- ============================================================
+WITH base_booking AS (
+    SELECT
+        r.reservation_id,
+        r.reservation_status,
+        r.check_out_date,
+        r.check_in_date,
+        r.report_date,
+        r.branch_code,
+        r.business_source,
+
+        v.charge_group,
+
+        b.rate_per_day,
+        b.sold_days,
+        b.insurance_amt,
+        b.extras_amt,
+
+        -- Daily prorated insurance (avoid division by zero)
+        CASE WHEN b.sold_days > 0 THEN b.insurance_amt / b.sold_days ELSE 0 END
+            AS daily_insurance,
+
+        -- Daily prorated extras
+        CASE WHEN b.sold_days > 0 THEN b.extras_amt / b.sold_days ELSE 0 END
+            AS daily_extras,
+
+        -- All-in daily rate
+        b.rate_per_day
+            + CASE WHEN b.sold_days > 0 THEN b.insurance_amt / b.sold_days ELSE 0 END
+            + CASE WHEN b.sold_days > 0 THEN b.extras_amt    / b.sold_days ELSE 0 END
+            AS daily_rate_all_in
+
+    FROM reservation  r
+    JOIN booking      b ON b.reservation_id = r.reservation_id
+    JOIN vehicle      v ON v.vehicle_id     = r.vehicle_id
+    JOIN customer     c ON c.customer_id    = r.customer_id
+
+    WHERE r.reservation_status IN ('Confirmed', 'Closed')
+      AND b.rental_amt          <> 0
+      AND b.rate_per_day        >  1
+      AND r.check_out_date      >= CURDATE()
+      AND r.check_out_date      <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+      AND CAST(r.report_date AS DATE) = CURDATE()
+      AND TRIM(r.branch_code)   <> 'HQ'
+),
+
+-- ============================================================
+-- CTE 2 : mapped
+--   Applies CASE WHEN lookups for branch names and car sizes
+-- ============================================================
+mapped AS (
+    SELECT
+        *,
+
+        -- Branch code → human-readable branch name
+        CASE
+            WHEN branch_code IN ('B01', 'B02') THEN 'Bangkok-01'
+            WHEN branch_code IN ('B03', 'B04') THEN 'Bangkok-02'
+            WHEN branch_code IN ('B05', 'B06') THEN 'Bangkok-Airport'
+            WHEN branch_code IN ('CM1', 'CM2') THEN 'Chiang Mai'
+            WHEN branch_code = 'PT1'           THEN 'Pattaya'
+            WHEN branch_code = 'HK1'           THEN 'Phuket'
+            WHEN branch_code = 'KK1'           THEN 'Khon Kaen'
+            WHEN branch_code = 'SR1'           THEN 'Surat Thani'
+            WHEN branch_code = 'HY1'           THEN 'Hat Yai'
+            WHEN branch_code = 'KR1'           THEN 'Krabi'
+            ELSE branch_code
+        END AS branch_name,
+
+        -- Business source normalization
+        CASE
+            WHEN UPPER(TRIM(business_source)) LIKE '%PARTNER%' THEN 'PARTNER'
+            WHEN UPPER(TRIM(business_source)) LIKE '%CORP%'    THEN 'CORPORATE'
+            WHEN TRIM(business_source) IS NULL                  THEN 'WEBSITE'
+            ELSE TRIM(business_source)
+        END AS source_name,
+
+        -- Charge group → standardized car size
+        CASE
+            WHEN charge_group IN ('ECO', 'ECO+')       THEN 'S'
+            WHEN charge_group = 'COMPACT+'             THEN 'SS'
+            WHEN charge_group IN ('COMPACT', 'SEDAN')  THEN 'S1'
+            WHEN charge_group = 'MID'                  THEN 'M'
+            WHEN charge_group IN ('MID+', 'MID-SUV')   THEN 'M1'
+            WHEN charge_group = 'FULLSIZE'             THEN 'L'
+            WHEN charge_group = 'FULLSIZE+'            THEN 'L1'
+            WHEN charge_group IN ('SUV', 'SUV+')       THEN 'XL'
+            WHEN charge_group = 'PICKUP'               THEN 'T2'
+            WHEN charge_group = 'PICKUP-4D'            THEN 'T4'
+            WHEN charge_group = 'PICKUP-4D+'           THEN 'T4A'
+            WHEN charge_group IN ('VAN', 'MINIBUS', 'MINIVAN', 'COACH') THEN 'PM'
+            WHEN charge_group = 'PREMIUM'              THEN 'PV'
+            WHEN charge_group = 'LUXURY'               THEN 'SV'
+            WHEN charge_group = 'LUXURY+'              THEN 'SV2'
+            ELSE charge_group
+        END AS car_size
+
+    FROM base_booking
+)
+
+-- ============================================================
+-- FINAL SELECT
+--   Calculates booking flag, days, and revenue per month window
+--   Window function: running revenue total per branch
+-- ============================================================
+SELECT
+    reservation_id,
+    reservation_status,
+    report_date,
+    check_out_date,
+    check_in_date,
+    branch_name,
+    source_name,
+    charge_group,
+    car_size,
+    daily_rate_all_in,
+
+    /* ===== M0 : Current month ===== */
+    CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+          AND check_in_date  >= CURDATE() THEN 1 ELSE 0
+    END AS m0_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+          AND check_in_date  >= CURDATE() THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(CURDATE())),
+            GREATEST(check_out_date, CURDATE())
+        ))
+    ELSE 0 END AS m0_days,
+
+    rate_per_day * CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+                         AND check_in_date  >= CURDATE() THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE 0 END AS m0_rental_rev,
+
+    daily_insurance * CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+                            AND check_in_date  >= CURDATE() THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE 0 END AS m0_insurance_rev,
+
+    daily_extras * CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+                         AND check_in_date  >= CURDATE() THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE 0 END AS m0_extras_rev,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+                              AND check_in_date  >= CURDATE() THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE 0 END AS m0_total_rev,
+
+    /* ===== M1 : Next month ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY) THEN 1 ELSE 0
+    END AS m1_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m1_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+                              AND check_in_date  >= DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m1_total_rev,
+
+    /* ===== M2 : Month +2 ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY) THEN 1 ELSE 0
+    END AS m2_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m2_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+                              AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m2_total_rev,
+
+    /* ===== M3 : Month +3 ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY) THEN 1 ELSE 0
+    END AS m3_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+          AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m3_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+                              AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))),
+            GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY))
+        ))
+    ELSE 0 END AS m3_total_rev,
+
+    /* ===== Window Function : running total revenue per branch ===== */
+    SUM(
+        daily_rate_all_in * (
+            CASE WHEN check_out_date <= LAST_DAY(CURDATE())
+                  AND check_in_date  >= CURDATE() THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+            ELSE 0 END
+            +
+            CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+                  AND check_in_date  >= DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY) THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))), GREATEST(check_out_date, DATE_ADD(LAST_DAY(CURDATE()), INTERVAL 1 DAY))))
+            ELSE 0 END
+            +
+            CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+                  AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY) THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))), GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH)), INTERVAL 1 DAY))))
+            ELSE 0 END
+            +
+            CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+                  AND check_in_date  >= DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY) THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))), GREATEST(check_out_date, DATE_ADD(LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH)), INTERVAL 1 DAY))))
+            ELSE 0 END
+        )
+    ) OVER (
+        PARTITION BY branch_name
+        ORDER BY check_out_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_branch_rev
+
+FROM mapped
+ORDER BY branch_name, check_out_date
