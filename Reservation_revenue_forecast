@@ -86,11 +86,11 @@ mapped AS (
             WHEN branch_code IN ('B05', 'B06') THEN 'Bangkok-Airport'
             WHEN branch_code IN ('CM1', 'CM2') THEN 'Chiang Mai'
             WHEN branch_code = 'PT1'           THEN 'Pattaya'
-            WHEN branch_code = 'HK1'           THEN 'Phuket'
-            WHEN branch_code = 'KK1'           THEN 'Khon Kaen'
-            WHEN branch_code = 'SR1'           THEN 'Surat Thani'
-            WHEN branch_code = 'HY1'           THEN 'Hat Yai'
-            WHEN branch_code = 'KR1'           THEN 'Krabi'
+            WHEN branch_code = 'PA1'           THEN 'Phuket'
+            WHEN branch_code = 'FS1'           THEN 'Khon Kaen'
+            WHEN branch_code = 'SS1'           THEN 'Surat Thani'
+            WHEN branch_code = 'HP1'           THEN 'Hat Yai'
+            WHEN branch_code = 'KPA1'           THEN 'Krabi'
             ELSE branch_code
         END AS branch_name,
 
