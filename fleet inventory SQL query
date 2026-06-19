@@ -1,0 +1,81 @@
+/*===================================================================================================
+  Fleet Inventory Query — Daily Report
+  Description : Filters active rental fleet by branch, car group size, and mileage band.
+  Last Updated : 2026-06-09
+===================================================================================================*/
+
+SELECT
+    "Current_Branch",
+    "Car_Group",
+    "Main_Branch_Trac",
+    "Fleet_Assignement",
+    "Status_Trac",
+    CAST(COALESCE("Mileage", '0') AS DECIMAL) AS "Mileage",
+    "Plate_No",
+
+    CASE
+        WHEN CAST(COALESCE("Mileage", '0') AS DECIMAL) < 80000 THEN '< 80k'
+        ELSE '>= 80k'
+    END AS "Mileage_Group",
+
+    -- Map Car_Group codes to standardized SIZE categories
+    CASE
+        WHEN "Car_Group" IN ('ES1', 'ES2', 'S')                                               THEN 'S'
+        WHEN "Car_Group" = 'ES3'                                                               THEN 'SS'
+        WHEN "Car_Group" IN ('S1', 'S2', 'S3')                                                THEN 'S1'
+        WHEN "Car_Group" = 'M'                                                                 THEN 'M'
+        WHEN "Car_Group" IN ('M1', 'M2')                                                       THEN 'M1'
+        WHEN "Car_Group" = 'L'                                                                 THEN 'L'
+        WHEN "Car_Group" = 'L1'                                                                THEN 'L1'
+        WHEN "Car_Group" IN ('XL1', 'XL2')                                                    THEN 'XL'
+        WHEN "Car_Group" = 'T2'                                                                THEN 'T2'
+        WHEN "Car_Group" = 'T4'                                                                THEN 'T4'
+        WHEN "Car_Group" = 'T4A'                                                               THEN 'T4A'
+        WHEN "Car_Group" IN ('PM','PL','PS','PSS','PXL','PXS','PXM','PLL','PLP','PSP','PSB','PTU') THEN 'PM'
+        WHEN "Car_Group" = 'PV'                                                                THEN 'PV'
+        WHEN "Car_Group" = 'SV1'                                                               THEN 'SV'
+        WHEN "Car_Group" = 'SV2'                                                               THEN 'SV2'
+        ELSE NULL
+    END AS "SIZE",
+
+    -- Map branch codes to human-readable branch names
+    CASE
+        WHEN "Current_Branch" IN ('11', '80') THEN 'BKK02'
+        WHEN "Current_Branch" IN ('13', '81') THEN 'BKK01'
+        WHEN "Current_Branch" IN ('14', '82') THEN 'DMK01'
+        WHEN "Current_Branch" IN ('26', '83') THEN 'CNX'
+        WHEN "Current_Branch" = '30'          THEN 'BKK03'
+        WHEN "Current_Branch" = '84'          THEN 'KKC'
+        WHEN "Current_Branch" = '85'          THEN 'PTY'
+        WHEN "Current_Branch" = '86'          THEN 'HHQ'
+        WHEN "Current_Branch" = '87'          THEN 'USM'
+        WHEN "Current_Branch" = '88'          THEN 'KBV'
+        WHEN "Current_Branch" = '89'          THEN 'HKT'
+        ELSE CONCAT('Unmapped_', "Current_Branch")
+    END AS "BRANCH"
+
+FROM "Daily Fleet Inventory Report (Yesterday)"
+
+WHERE "Main_Branch_Trac"  = 'RB'
+  AND "Fleet_Assignement" = 'Rental'
+  AND "Status_Trac"       IN ('AV', 'UB', 'UT')
+  AND (
+        CASE
+            WHEN "Car_Group" IN ('ES1', 'ES2', 'S')                                               THEN 'S'
+            WHEN "Car_Group" = 'ES3'                                                               THEN 'SS'
+            WHEN "Car_Group" IN ('S1', 'S2', 'S3')                                                THEN 'S1'
+            WHEN "Car_Group" = 'M'                                                                 THEN 'M'
+            WHEN "Car_Group" IN ('M1', 'M2')                                                       THEN 'M1'
+            WHEN "Car_Group" = 'L'                                                                 THEN 'L'
+            WHEN "Car_Group" = 'L1'                                                                THEN 'L1'
+            WHEN "Car_Group" IN ('XL1', 'XL2')                                                    THEN 'XL'
+            WHEN "Car_Group" = 'T2'                                                                THEN 'T2'
+            WHEN "Car_Group" = 'T4'                                                                THEN 'T4'
+            WHEN "Car_Group" = 'T4A'                                                               THEN 'T4A'
+            WHEN "Car_Group" IN ('PM','PL','PS','PSS','PXL','PXS','PXM','PLL','PLP','PSP','PSB','PTU') THEN 'PM'
+            WHEN "Car_Group" = 'PV'                                                                THEN 'PV'
+            WHEN "Car_Group" = 'SV1'                                                               THEN 'SV'
+            WHEN "Car_Group" = 'SV2'                                                               THEN 'SV2'
+            ELSE NULL
+        END
+      ) IS NOT NULL
