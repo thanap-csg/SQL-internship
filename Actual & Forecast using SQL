@@ -1,0 +1,354 @@
+/*
+================================================================================
+  Project      : Agreement Revenue — Actual & Forecast using SQL
+  Dataset      : Dummy Rental Data
+  Description  : Calculates actual revenue for agreements already checked out
+                 (P1 = current month actuals, P2 = currently open agreements)
+                 and forecasts revenue for the next 3 months (M1–M3).
+
+  Features
+    - Revenue Allocation      : splits rental, insurance, and extras per day
+    - Actual Revenue (P1)     : agreements checked out before today, in current month
+    - Open Agreements (P2)    : currently active agreements (status = Open)
+    - Forward Forecast (M1–M3): future month revenue windows
+    - Mileage Banding         : 4-tier mileage classification
+    - Car Size Mapping        : model-level fallback when charge group is unclassified
+    - CASE WHEN Mapping       : branch codes → names, charge groups → sizes
+    - CTE                     : isolates reusable daily rate expressions
+    - Window Function         : running revenue total per branch
+
+  Tables
+    - agreement       : rental agreement header (status, dates, branch, financials)
+    - fleet_inventory : vehicle mileage snapshot (joined by plate number)
+================================================================================
+*/
+
+-- ============================================================
+-- CTE 1 : base_agreement
+--   Joins agreement with fleet snapshot and pre-calculates
+--   daily prorated rental, insurance, and extras amounts
+-- ============================================================
+WITH base_agreement AS (
+    SELECT
+        a.agreement_id,
+        a.plate_no,
+        a.agreement_status,
+        a.check_out_date,
+        a.check_in_date,
+        a.branch_code,
+        a.charge_group,
+        a.car_model,
+        a.sold_days,
+        a.rental_amt,
+        a.insurance_amt,
+        a.extras_amt,
+
+        f.mileage,
+
+        -- Daily prorated rental
+        CASE WHEN a.sold_days > 0 THEN a.rental_amt    / a.sold_days ELSE 0 END AS daily_rental,
+
+        -- Daily prorated insurance
+        CASE WHEN a.sold_days > 0 THEN a.insurance_amt / a.sold_days ELSE 0 END AS daily_insurance,
+
+        -- Daily prorated extras
+        CASE WHEN a.sold_days > 0 THEN a.extras_amt    / a.sold_days ELSE 0 END AS daily_extras,
+
+        -- All-in daily rate
+        CASE WHEN a.sold_days > 0 THEN a.rental_amt    / a.sold_days ELSE 0 END
+      + CASE WHEN a.sold_days > 0 THEN a.insurance_amt / a.sold_days ELSE 0 END
+      + CASE WHEN a.sold_days > 0 THEN a.extras_amt    / a.sold_days ELSE 0 END
+            AS daily_rate_all_in
+
+    FROM agreement       a
+    LEFT JOIN fleet_inventory f ON f.plate_no = a.plate_no
+
+    WHERE a.agreement_id NOT LIKE 'HQ%'
+      AND (
+            -- P1 : already checked out, overlaps current month
+            (    a.check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+             AND a.check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE)
+            )
+            OR
+            -- P2 / M1–M3 : open agreements with future check-in
+            (    a.check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+             AND a.check_in_date  >= CURDATE()
+             AND a.agreement_status = 'Open'
+            )
+          )
+),
+
+-- ============================================================
+-- CTE 2 : mapped
+--   Applies CASE WHEN lookups for branch, mileage tier, and
+--   car size. For unclassified charge groups (UNKNOWN), falls
+--   back to a model-level lookup using dummy car model names.
+-- ============================================================
+mapped AS (
+    SELECT
+        *,
+
+        -- Branch code → human-readable branch name
+        CASE
+            WHEN branch_code IN ('N01', 'N02', 'N03') THEN 'Bangkok-01'
+            WHEN branch_code IN ('N04', 'N05')         THEN 'Bangkok-02'
+            WHEN branch_code = 'N06'                   THEN 'Bangkok-03'
+            WHEN branch_code IN ('N07', 'N08')         THEN 'Chiang Mai'
+            WHEN branch_code IN ('N09', 'N10')         THEN 'Bangkok-Airport'
+            WHEN branch_code IN ('N11', 'N12')         THEN 'Hua Hin'
+            WHEN branch_code IN ('N13', 'N14')         THEN 'Phuket'
+            WHEN branch_code IN ('N15', 'N16')         THEN 'Krabi'
+            WHEN branch_code IN ('N17', 'N18')         THEN 'Khon Kaen'
+            WHEN branch_code IN ('N19', 'N20')         THEN 'Pattaya'
+            WHEN branch_code IN ('N21', 'N22')         THEN 'Hat Yai'
+            ELSE branch_code
+        END AS branch_name,
+
+        -- Mileage → 4-tier band
+        CASE
+            WHEN mileage <  80000  THEN '0–80K'
+            WHEN mileage < 100000  THEN '80–100K'
+            WHEN mileage < 150000  THEN '100–150K'
+            WHEN mileage >= 150000 THEN '150K+'
+            ELSE 'Unknown'
+        END AS mileage_tier,
+
+        -- Charge group → standardized car size
+        -- For unclassified group (UNKNOWN), falls back to model-level lookup
+        CASE
+            WHEN TRIM(charge_group) = 'UNKNOWN' THEN
+                CASE
+                    WHEN car_model IN ('ALPHA HATCH 1.0 CVT', 'BETA HATCH 1.0 CVT')                    THEN 'SS'
+                    WHEN car_model IN ('ALPHA SEDAN 1.5 E AT', 'BETA SEDAN 1.5 MID AT',
+                                       'GAMMA SEDAN 1.2 ENTRY', 'GAMMA SEDAN 1.2 SPORT AT',
+                                       'DELTA COMPACT 1.0 TURBO CVT')                                  THEN 'S'
+                    WHEN car_model IN ('ALPHA MPV 1.5 PREMIUM AT', 'BETA MPV 1.5 GT AT',
+                                       'GAMMA MPV CROSS 1.5 GT', 'DELTA MPV TREND AT')                 THEN 'S1'
+                    WHEN car_model IN ('ALPHA SEDAN 1.8 E AT', 'ALPHA SEDAN 1.8 SPORT AT',
+                                       'ALPHA SEDAN 1.8 HEV PREMIUM', 'BETA COUPE 1.5 TURBO RS AT',
+                                       'BETA COUPE 1.8 EL AT', 'GAMMA SUV 1.8 EL AT')                  THEN 'M'
+                    WHEN car_model IN ('ALPHA CROSSOVER 1.8 SPORT PLUS AT',
+                                       'ALPHA CROSSOVER HEV PREMIUM AT')                               THEN 'M1'
+                    WHEN car_model IN ('ALPHA SEDAN 2.5 G AT', 'ALPHA SEDAN 2.5 HEV PREMIUM AT',
+                                       'BETA SEDAN 2.0 EL+ AT', 'GAMMA SEDAN 2.0 XL AT')              THEN 'L'
+                    WHEN car_model IN ('ALPHA SUV PHEV 2.4 GT 4WD AT')                                 THEN 'L1'
+                    WHEN car_model IN ('ALPHA SUV 2.4 V 2WD AT', 'ALPHA SUV 2.8 V 2WD AT',
+                                       'BETA MPV 2.8 G AT', 'GAMMA SUV 2.4 EL AT',
+                                       'DELTA SUV 2.4 GT 4WD AT', 'EPSILON SUV 2.3 VL 4WD AT')        THEN 'XL'
+                    WHEN car_model IN ('ALPHA PICKUP 2.4 ENTRY 2WD MT',
+                                       'BETA PICKUP 2.4 MID 2WD MT')                                   THEN 'T4'
+                    WHEN car_model IN ('ALPHA PICKUP 2.4 ENTRY 2WD AT',
+                                       'ALPHA PICKUP 2.8 G 4WD AT',
+                                       'ALPHA PICKUP SPORT 2.8 4WD AT')                                THEN 'T4A'
+                    WHEN car_model IN ('ALPHA LUXURY SEDAN 300 AMG AT',
+                                       'BETA LUXURY COUPE 350 AMG AT',
+                                       'GAMMA LUXURY SUV 200 AMG AT')                                  THEN 'PM'
+                    WHEN car_model IN ('ALPHA MINIVAN 2.5 HV AT', 'BETA MINIVAN 2.5 V AT',
+                                       'GAMMA VAN 3.0 V AT', 'DELTA VAN 2.0 BITDI AT')                 THEN 'PV'
+                    WHEN car_model IN ('ALPHA COMMUTER 2.8 AT', 'ALPHA COMMUTER 3.0 AT',
+                                       'BETA VAN S AT', 'GAMMA VAN ELITE AT')                          THEN 'SV'
+                    WHEN car_model IN ('ALPHA VAN VIP AT', 'BETA VAN TREND AT')                        THEN 'SV2'
+                    ELSE 'UNKNOWN'
+                END
+            WHEN TRIM(charge_group) IN ('ECO', 'ECO+')       THEN 'S'
+            WHEN TRIM(charge_group) = 'COMPACT+'             THEN 'SS'
+            WHEN TRIM(charge_group) IN ('COMPACT', 'SEDAN')  THEN 'S1'
+            WHEN TRIM(charge_group) = 'MID'                  THEN 'M'
+            WHEN TRIM(charge_group) IN ('MID+', 'MID-SUV')   THEN 'M1'
+            WHEN TRIM(charge_group) = 'FULLSIZE'             THEN 'L'
+            WHEN TRIM(charge_group) = 'FULLSIZE+'            THEN 'L1'
+            WHEN TRIM(charge_group) IN ('SUV', 'SUV+')       THEN 'XL'
+            WHEN TRIM(charge_group) = 'PICKUP'               THEN 'T2'
+            WHEN TRIM(charge_group) = 'PICKUP-4D'            THEN 'T4'
+            WHEN TRIM(charge_group) = 'PICKUP-4D+'           THEN 'T4A'
+            WHEN TRIM(charge_group) IN ('VAN', 'MINIBUS', 'MINIVAN', 'COACH') THEN 'PM'
+            WHEN TRIM(charge_group) = 'PREMIUM'              THEN 'PV'
+            WHEN TRIM(charge_group) = 'LUXURY'               THEN 'SV'
+            WHEN TRIM(charge_group) = 'LUXURY+'              THEN 'SV2'
+            ELSE TRIM(charge_group)
+        END AS car_size
+
+    FROM base_agreement
+)
+
+-- ============================================================
+-- FINAL SELECT
+--   P1  : actuals — agreements checked out before today
+--   P2  : open    — currently active rentals
+--   M1–M3 : forecast — future month windows
+--   Window function: running revenue total per branch
+-- ============================================================
+SELECT
+    agreement_id,
+    plate_no,
+    agreement_status,
+    check_out_date,
+    check_in_date,
+    branch_name,
+    charge_group,
+    car_size,
+    mileage,
+    mileage_tier,
+    daily_rate_all_in,
+
+    /* ===== P1 : Current month actuals (checked out before today) ===== */
+    CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+          AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE)
+         THEN 1 ELSE NULL
+    END AS p1_booking,
+
+    CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+          AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    CURDATE()),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS p1_days,
+
+    daily_rental * CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                         AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, CURDATE()), GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))))
+    ELSE NULL END AS p1_rental_rev,
+
+    daily_insurance * CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                            AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, CURDATE()), GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))))
+    ELSE NULL END AS p1_insurance_rev,
+
+    daily_extras * CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                         AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, CURDATE()), GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))))
+    ELSE NULL END AS p1_extras_rev,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                              AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, CURDATE()), GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))))
+    ELSE NULL END AS p1_total_rev,
+
+    /* ===== P2 : Currently open agreements ===== */
+    CASE WHEN check_out_date    <= CURDATE()
+          AND check_in_date     >= CURDATE()
+          AND agreement_status   = 'Open'
+         THEN 1 ELSE NULL
+    END AS p2_booking,
+
+    CASE WHEN check_out_date    <= CURDATE()
+          AND check_in_date     >= CURDATE()
+          AND agreement_status   = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(CURDATE())),
+            GREATEST(check_out_date, CURDATE())
+        ))
+    ELSE NULL END AS p2_days,
+
+    daily_rental * CASE WHEN check_out_date <= CURDATE() AND check_in_date >= CURDATE() AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE NULL END AS p2_rental_rev,
+
+    daily_insurance * CASE WHEN check_out_date <= CURDATE() AND check_in_date >= CURDATE() AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE NULL END AS p2_insurance_rev,
+
+    daily_extras * CASE WHEN check_out_date <= CURDATE() AND check_in_date >= CURDATE() AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE NULL END AS p2_extras_rev,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= CURDATE() AND check_in_date >= CURDATE() AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+    ELSE NULL END AS p2_total_rev,
+
+    /* ===== M1 : Next month forecast ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open'
+         THEN 1 ELSE NULL
+    END AS m1_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m1_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))
+                              AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE)
+                              AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 1 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m1_total_rev,
+
+    /* ===== M2 : Month +2 forecast ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open'
+         THEN 1 ELSE NULL
+    END AS m2_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m2_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+                              AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01') AS DATE)
+                              AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 2 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 2 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m2_total_rev,
+
+    /* ===== M3 : Month +3 forecast ===== */
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 3 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open'
+         THEN 1 ELSE NULL
+    END AS m3_booking,
+
+    CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+          AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 3 MONTH), '%Y-%m-01') AS DATE)
+          AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 3 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m3_days,
+
+    daily_rate_all_in * CASE WHEN check_out_date <= LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))
+                              AND check_in_date  >= CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 3 MONTH), '%Y-%m-01') AS DATE)
+                              AND agreement_status = 'Open' THEN
+        GREATEST(1, DATEDIFF(
+            LEAST(check_in_date,    LAST_DAY(DATE_ADD(CURDATE(), INTERVAL 3 MONTH))),
+            GREATEST(check_out_date, CAST(DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 3 MONTH), '%Y-%m-01') AS DATE))
+        ))
+    ELSE NULL END AS m3_total_rev,
+
+    /* ===== Window Function : running total revenue per branch ===== */
+    SUM(
+        daily_rate_all_in * (
+            COALESCE(CASE WHEN check_out_date <= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                           AND check_in_date  >= CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE) THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, CURDATE()), GREATEST(check_out_date, CAST(DATE_FORMAT(CURDATE(), '%Y-%m-01') AS DATE))))
+            ELSE 0 END, 0)
+            +
+            COALESCE(CASE WHEN check_out_date <= CURDATE() AND check_in_date >= CURDATE() AND agreement_status = 'Open' THEN
+                GREATEST(1, DATEDIFF(LEAST(check_in_date, LAST_DAY(CURDATE())), GREATEST(check_out_date, CURDATE())))
+            ELSE 0 END, 0)
+        )
+    ) OVER (
+        PARTITION BY branch_name
+        ORDER BY check_out_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS running_branch_rev
+
+FROM mapped
+ORDER BY branch_name, check_out_date
