@@ -1,81 +1,89 @@
 /*===================================================================================================
-  Fleet Inventory Query — Daily Report
-  Description : Filters active rental fleet by branch, car group size, and mileage band.
+  Project      : Fleet Inventory Query — Daily Report
+  Dataset      : Dummy Rental Data
+  Description  : Filters active rental fleet by branch, car group size, and mileage band.
   Last Updated : 2026-06-09
+
+  Features
+    - Mileage Banding     : groups vehicles into < 80k / >= 80k mileage tiers
+    - Car Size Mapping    : normalizes charge group codes into standardized size categories
+    - Branch Mapping      : maps branch codes to human-readable branch names
+    - CASE WHEN Filtering : excludes unmapped / invalid car groups via WHERE clause
 ===================================================================================================*/
 
 SELECT
-    "Current_Branch",
-    "Car_Group",
-    "Main_Branch_Trac",
-    "Fleet_Assignement",
-    "Status_Trac",
-    CAST(COALESCE("Mileage", '0') AS DECIMAL) AS "Mileage",
-    "Plate_No",
+    current_branch,
+    car_group,
+    main_branch,
+    fleet_assignment,
+    fleet_status,
+    CAST(COALESCE(mileage, '0') AS DECIMAL) AS mileage,
+    plate_no,
 
+    -- Mileage band
     CASE
-        WHEN CAST(COALESCE("Mileage", '0') AS DECIMAL) < 80000 THEN '< 80k'
+        WHEN CAST(COALESCE(mileage, '0') AS DECIMAL) < 80000 THEN '< 80k'
         ELSE '>= 80k'
-    END AS "Mileage_Group",
+    END AS mileage_group,
 
-    -- Map Car_Group codes to standardized SIZE categories
+    -- Car group → standardized size
     CASE
-        WHEN "Car_Group" IN ('ES1', 'ES2', 'S')                                               THEN 'S'
-        WHEN "Car_Group" = 'ES3'                                                               THEN 'SS'
-        WHEN "Car_Group" IN ('S1', 'S2', 'S3')                                                THEN 'S1'
-        WHEN "Car_Group" = 'M'                                                                 THEN 'M'
-        WHEN "Car_Group" IN ('M1', 'M2')                                                       THEN 'M1'
-        WHEN "Car_Group" = 'L'                                                                 THEN 'L'
-        WHEN "Car_Group" = 'L1'                                                                THEN 'L1'
-        WHEN "Car_Group" IN ('XL1', 'XL2')                                                    THEN 'XL'
-        WHEN "Car_Group" = 'T2'                                                                THEN 'T2'
-        WHEN "Car_Group" = 'T4'                                                                THEN 'T4'
-        WHEN "Car_Group" = 'T4A'                                                               THEN 'T4A'
-        WHEN "Car_Group" IN ('PM','PL','PS','PSS','PXL','PXS','PXM','PLL','PLP','PSP','PSB','PTU') THEN 'PM'
-        WHEN "Car_Group" = 'PV'                                                                THEN 'PV'
-        WHEN "Car_Group" = 'SV1'                                                               THEN 'SV'
-        WHEN "Car_Group" = 'SV2'                                                               THEN 'SV2'
+        WHEN car_group IN ('ECO', 'ECO+')       THEN 'S'
+        WHEN car_group = 'COMPACT+'             THEN 'SS'
+        WHEN car_group IN ('COMPACT', 'SEDAN')  THEN 'S1'
+        WHEN car_group = 'MID'                  THEN 'M'
+        WHEN car_group IN ('MID+', 'MID-SUV')   THEN 'M1'
+        WHEN car_group = 'FULLSIZE'             THEN 'L'
+        WHEN car_group = 'FULLSIZE+'            THEN 'L1'
+        WHEN car_group IN ('SUV', 'SUV+')       THEN 'XL'
+        WHEN car_group = 'PICKUP'               THEN 'T2'
+        WHEN car_group = 'PICKUP-4D'            THEN 'T4'
+        WHEN car_group = 'PICKUP-4D+'           THEN 'T4A'
+        WHEN car_group IN ('VAN', 'MINIBUS', 'MINIVAN', 'COACH') THEN 'PM'
+        WHEN car_group = 'PREMIUM'              THEN 'PV'
+        WHEN car_group = 'LUXURY'               THEN 'SV'
+        WHEN car_group = 'LUXURY+'              THEN 'SV2'
         ELSE NULL
-    END AS "SIZE",
+    END AS size,
 
-    -- Map branch codes to human-readable branch names
+    -- Branch code → human-readable branch name
     CASE
-        WHEN "Current_Branch" IN ('11', '80') THEN 'BKK02'
-        WHEN "Current_Branch" IN ('13', '81') THEN 'BKK01'
-        WHEN "Current_Branch" IN ('14', '82') THEN 'DMK01'
-        WHEN "Current_Branch" IN ('26', '83') THEN 'CNX'
-        WHEN "Current_Branch" = '30'          THEN 'BKK03'
-        WHEN "Current_Branch" = '84'          THEN 'KKC'
-        WHEN "Current_Branch" = '85'          THEN 'PTY'
-        WHEN "Current_Branch" = '86'          THEN 'HHQ'
-        WHEN "Current_Branch" = '87'          THEN 'USM'
-        WHEN "Current_Branch" = '88'          THEN 'KBV'
-        WHEN "Current_Branch" = '89'          THEN 'HKT'
-        ELSE CONCAT('Unmapped_', "Current_Branch")
-    END AS "BRANCH"
+        WHEN current_branch IN ('B01', 'B02') THEN 'Bangkok-01'
+        WHEN current_branch IN ('B03', 'B04') THEN 'Bangkok-02'
+        WHEN current_branch IN ('B05', 'B06') THEN 'Bangkok-Airport'
+        WHEN current_branch IN ('CM1', 'CM2') THEN 'Chiang Mai'
+        WHEN current_branch = 'PT1'           THEN 'Pattaya'
+        WHEN current_branch = 'HK1'           THEN 'Phuket'
+        WHEN current_branch = 'KK1'           THEN 'Khon Kaen'
+        WHEN current_branch = 'SR1'           THEN 'Surat Thani'
+        WHEN current_branch = 'HY1'           THEN 'Hat Yai'
+        WHEN current_branch = 'KR1'           THEN 'Krabi'
+        ELSE CONCAT('Unmapped_', current_branch)
+    END AS branch_name
 
-FROM "Daily Fleet Inventory Report (Yesterday)"
+FROM daily_fleet_inventory
 
-WHERE "Main_Branch_Trac"  = 'RB'
-  AND "Fleet_Assignement" = 'Rental'
-  AND "Status_Trac"       IN ('AV', 'UB', 'UT')
+WHERE main_branch     = 'RENTAL'
+  AND fleet_assignment = 'Rental'
+  AND fleet_status     IN ('AV', 'UB', 'UT')
   AND (
+        -- Exclude vehicles with no valid size mapping
         CASE
-            WHEN "Car_Group" IN ('ES1', 'ES2', 'S')                                               THEN 'S'
-            WHEN "Car_Group" = 'ES3'                                                               THEN 'SS'
-            WHEN "Car_Group" IN ('S1', 'S2', 'S3')                                                THEN 'S1'
-            WHEN "Car_Group" = 'M'                                                                 THEN 'M'
-            WHEN "Car_Group" IN ('M1', 'M2')                                                       THEN 'M1'
-            WHEN "Car_Group" = 'L'                                                                 THEN 'L'
-            WHEN "Car_Group" = 'L1'                                                                THEN 'L1'
-            WHEN "Car_Group" IN ('XL1', 'XL2')                                                    THEN 'XL'
-            WHEN "Car_Group" = 'T2'                                                                THEN 'T2'
-            WHEN "Car_Group" = 'T4'                                                                THEN 'T4'
-            WHEN "Car_Group" = 'T4A'                                                               THEN 'T4A'
-            WHEN "Car_Group" IN ('PM','PL','PS','PSS','PXL','PXS','PXM','PLL','PLP','PSP','PSB','PTU') THEN 'PM'
-            WHEN "Car_Group" = 'PV'                                                                THEN 'PV'
-            WHEN "Car_Group" = 'SV1'                                                               THEN 'SV'
-            WHEN "Car_Group" = 'SV2'                                                               THEN 'SV2'
+            WHEN car_group IN ('ECO', 'ECO+')       THEN 'S'
+            WHEN car_group = 'COMPACT+'             THEN 'SS'
+            WHEN car_group IN ('COMPACT', 'SEDAN')  THEN 'S1'
+            WHEN car_group = 'MID'                  THEN 'M'
+            WHEN car_group IN ('MID+', 'MID-SUV')   THEN 'M1'
+            WHEN car_group = 'FULLSIZE'             THEN 'L'
+            WHEN car_group = 'FULLSIZE+'            THEN 'L1'
+            WHEN car_group IN ('SUV', 'SUV+')       THEN 'XL'
+            WHEN car_group = 'PICKUP'               THEN 'T2'
+            WHEN car_group = 'PICKUP-4D'            THEN 'T4'
+            WHEN car_group = 'PICKUP-4D+'           THEN 'T4A'
+            WHEN car_group IN ('VAN', 'MINIBUS', 'MINIVAN', 'COACH') THEN 'PM'
+            WHEN car_group = 'PREMIUM'              THEN 'PV'
+            WHEN car_group = 'LUXURY'               THEN 'SV'
+            WHEN car_group = 'LUXURY+'              THEN 'SV2'
             ELSE NULL
         END
       ) IS NOT NULL
